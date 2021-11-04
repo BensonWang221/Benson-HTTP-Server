@@ -2,6 +2,7 @@
 #include <vector>
 #include <functional>
 #include <mutex>
+#include <memory>
 #include "SyncQueue.h"
 
 class ThreadPool
@@ -28,7 +29,7 @@ private:
     void RunInThread();
 
 private:
-    std::vector<std::thread> m_threadGroup;
+    std::vector<std::shared_ptr<std::thread>> m_threadGroup;
     SyncQueue<Task> m_queue;
     std::atomic_bool m_running;
     std::once_flag m_onceFlag;

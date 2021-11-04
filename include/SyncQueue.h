@@ -15,7 +15,7 @@ public:
 
     SyncQueue(int maxSize) : m_maxSize(maxSize), m_needStop(false) {}
 
-    void Put(T& task);
+    void Put(const T& task);
 
     void Put(T &&task);
 
@@ -60,7 +60,7 @@ private:
 };
 
 template <class T>
-void SyncQueue<T>::Put(T& task)
+void SyncQueue<T>::Put(const T& task)
 {
     Add(task);
 }
@@ -78,6 +78,8 @@ void SyncQueue<T>::Take(T &task)
     // 当队列非空或者stop时，停止阻塞等待
     m_notEmpty.wait(locker, [this]()
                     { return this->m_needStop || this->NotEmpty(); });
+    
+    // 当stop时会直接return，因此线程池如果有线程在阻塞等待也会返回
     if (m_needStop)
         return;
     task = m_tasks.back();
@@ -94,10 +96,10 @@ void SyncQueue<T>::Take(std::list<T> &tasks, int n)
     if (m_needStop)
         return;
 
-    auto endIter = std::prev(m_tasks.end(), 1);
+    size_t size = m_tasks.size();
     auto startIter = n >= m_tasks.size() ? m_tasks.begin() : std::prev(m_tasks.end(), n + 1);
-    tasks.asign(startIter, endIter);
-    m_tasks.erase(startIter, endIter);
+    tasks.assign(startIter, m_tasks.end());
+    m_tasks.erase(startIter, m_tasks.end());
     m_notFull.notify_one();
 }
 
@@ -160,4 +162,5 @@ bool SyncQueue<T>::NotEmpty() const
         std::cout << "Syncqueue empty, need wait, thread id = "
                   << std::this_thread::get_id() << std::endl;
     }
+    return !empty;
 }
