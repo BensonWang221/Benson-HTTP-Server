@@ -1,3 +1,5 @@
+#ifndef THREAD_POOL_INCLUDED
+#define THREAD_POOL_INCLUDED
 #include <atomic>
 #include <vector>
 #include <functional>
@@ -20,7 +22,6 @@ public:
 
     void AddTask(const Task& task);
 
-
 private:
     void Start(int numThreads);
 
@@ -34,3 +35,4 @@ private:
     std::atomic_bool m_running;
     std::once_flag m_onceFlag;
 };
+#endif
