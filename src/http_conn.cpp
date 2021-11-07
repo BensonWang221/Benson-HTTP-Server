@@ -1,4 +1,6 @@
 #include <unistd.h>
+#include <stdarg.h>
+#include <sys/uio.h>
 #include <sys/socket.h>
 #include <string.h>
 #include <sys/epoll.h>
@@ -23,13 +25,13 @@ namespace
     // 根目录
     const string RootDir("/var/www/html");
 
-    int SetNonblocking(int fd);
+    inline int SetNonblocking(int fd);
 
-    void Addfd(int epollfd, int fd, bool oneshot);
+    inline void Addfd(int epollfd, int fd, bool oneshot);
 
-    void Removefd(int epollfd, int fd);
+    inline void Removefd(int epollfd, int fd);
 
-    void Modifyfd(int epollfd, int fd, int ev);
+    inline void Modifyfd(int epollfd, int fd, int ev);
 }
 
 int http_conn::epollfd = -1;
@@ -54,6 +56,21 @@ void http_conn::Init(int sockfd, const sockaddr_in &addr)
 #endif
     Addfd(epollfd, sockfd, true);
     ++userCount;
+}
+
+void http_conn::Init()
+{
+    m_checkState = CHECK_STATE_REQUESTLINE;
+    m_linger = false;
+    m_method = GET;
+    m_url = nullptr;
+    m_filePath.clear();
+    m_version = m_host = m_body = m_filemap = nullptr;
+    m_contentLength = 0;
+    m_checkedPos = m_curlinePos = 0;
+    m_writeBytes = 0;
+    bzero(m_readbuf, sizeof(m_readbuf));
+    bzero(m_writebuf, sizeof(m_writebuf));
 }
 
 void http_conn::CloseConnection(bool realClose)
@@ -122,7 +139,7 @@ http_conn::LINE_STATUS http_conn::ParseLine()
     return LINE_OPEN;
 }
 
-http_conn::HTTP_CODE http_conn::ParseRequestLine(char *text)
+HTTP_CODE http_conn::ParseRequestLine(char *text)
 {
     m_url = strpbrk(text, " \t");
     if (!m_url)
@@ -163,7 +180,7 @@ http_conn::HTTP_CODE http_conn::ParseRequestLine(char *text)
     return NO_REQUEST;
 }
 
-http_conn::HTTP_CODE http_conn::ParseHeaders(char *text)
+HTTP_CODE http_conn::ParseHeaders(char *text)
 {
     // 空行，说明首部字段解析完毕
     if (text[0] == '\0')
@@ -211,7 +228,7 @@ http_conn::HTTP_CODE http_conn::ParseHeaders(char *text)
     return NO_REQUEST;
 }
 
-http_conn::HTTP_CODE http_conn::ParseContent(char *text)
+HTTP_CODE http_conn::ParseContent(char *text)
 {
     m_body = text;
     // 正文已全部获得
@@ -223,13 +240,198 @@ http_conn::HTTP_CODE http_conn::ParseContent(char *text)
     return NO_REQUEST;
 }
 
-http_conn::HTTP_CODE http_conn::ProcessRead()
+HTTP_CODE http_conn::ProcessRead()
 {
     LINE_STATUS lineStatus = LINE_OK;
     HTTP_CODE result = NO_REQUEST;
     char* text = nullptr;
 
     // 该解析请求正文后就不需要parse line了
+    // check content时判断linestatus是因为content内容没有全部收到时也不再循环
+    while((m_checkState == CHECK_STATE_CONTENT && lineStatus == LINE_OK)
+           || ((lineStatus = ParseLine()) == LINE_OK))
+    {
+        text = GetLine();
+        m_curlinePos = m_checkedPos;
+        switch (m_checkState)
+        {
+            case CHECK_STATE_REQUESTLINE:
+                result = ParseRequestLine(text);
+                if (result == BAD_REQUEST)
+                    return BAD_REQUEST;
+                break;
+
+            case CHECK_STATE_HEADER:
+                result = ParseHeaders(text);
+                if (result == BAD_REQUEST) 
+                    return BAD_REQUEST;
+                else if (result == GET_REQUEST)
+                    return DoRequest();
+                break;
+
+            case CHECK_STATE_CONTENT:
+                result = ParseContent(text);
+                if (result == GET_REQUEST)
+                    return DoRequest();
+                // content不完整，跳出大循环
+                lineStatus = LINE_OPEN;
+                break;
+            
+            default:
+                return INTERNAL_ERROR;
+        }
+    }
+    return NO_REQUEST;
+}
+
+HTTP_CODE http_conn::DoRequest()
+{
+    if (stat(m_filePath.c_str(), &m_fileStat) < 0)
+        return NO_RESOURCE;
+    if (S_ISDIR(m_fileStat.st_mode))
+        return BAD_REQUEST;
+    if (!(m_fileStat.st_mode & S_IROTH))
+        return FORBIDDEN_REQUEST;
+    
+    int fd = open(m_filePath.c_str(), O_RDONLY);
+    if ((m_filemap = static_cast<char*>(mmap(nullptr, m_fileStat.st_size, 
+                                   PROT_READ, MAP_PRIVATE, fd, 0))) == MAP_FAILED)
+        return INTERNAL_ERROR;
+
+    close(fd);
+    return FILE_REQUEST;
+}
+
+bool http_conn::AddResponse(const char* format, ...)
+{
+    if (m_writeBytes >= WRITE_BUFFER_SIZE)
+        return false;
+    va_list argList;
+    va_start(argList, format);
+    int len = vsnprintf(m_writebuf + m_writeBytes, WRITE_BUFFER_SIZE - m_writeBytes - 1,
+                        format, argList);
+    
+    // 要留出\r\n的空行
+    if (len >= WRITE_BUFFER_SIZE - m_writeBytes - 3)
+        return false;
+    m_writeBytes += len;
+    va_end(argList);
+    return true;
+}
+
+bool http_conn::AddStatusLine(int status, const string& title)
+{
+    return AddResponse("%s %d %s\r\n", "HTTP/1.1", status, title.c_str());
+}
+
+bool http_conn::AddHeaders(const string& key, const string& value)
+{
+    if (AddResponse("%s: %s\r\n", key.c_str(), value.c_str()))
+    {
+        // 每次加header之后，就把后面两个位置设置为\r\n
+        m_writebuf[m_writeBytes] = '\r';
+        m_writebuf[m_writeBytes + 1] = '\n';
+        return true;
+    }
+    return false;
+}
+
+bool http_conn::AddLinger()
+{
+    return AddHeaders("Connection:", m_linger ? "keep-alive" : "close");
+}
+
+bool http_conn::AddBlankLine()
+{
+    AddResponse("%s", "\r\n");
+}
+
+bool http_conn::AddResponseForm(const string& form)
+{
+    AddHeaders("Content-Length", to_string(form.size()));
+    AddResponseBody(form.c_str(), form.size());
+}
+
+bool http_conn::AddResponseBody(const char* text, size_t size)
+{
+
+}
+
+bool http_conn::SendResponse(int code, const string& title, const char* content, size_t len)
+{
+
+}
+
+bool http_conn::ProcessWrite(HTTP_CODE code)
+{
+    switch(code)
+    {
+        case INTERNAL_ERROR:
+            AddStatusLine(500, ERROR500);
+            if (!AddResponseForm(ERROR500FORM))
+                return false;
+            break;
+        case BAD_REQUEST:
+            AddStatusLine(400, ERROR400);
+            if (!AddResponseForm(ERROR400FORM))
+                return false;
+            break;
+    }
+}
+
+void http_conn::Unmap()
+{
+    if (m_filemap)
+    {
+        munmap(m_filemap, m_fileStat.st_size);
+        m_filemap = nullptr;
+    }
+}
+
+bool http_conn::Write()
+{
+    int ret = 0;
+    int bytesToSend = m_writeBytes,
+        bytesHaveSent = 0;
+    
+    if (bytesToSend == 0)
+    {
+        Modifyfd(epollfd, m_sockfd, EPOLLIN);
+        Init();
+        return true;
+    }
+
+    while (true)
+    {
+        if ((ret = writev(m_sockfd, m_iv, m_ivCount)) < 0)
+        {
+            // 当写缓冲区已满，等待下一轮EPOLLOUT事件
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                Modifyfd(epollfd, m_sockfd, EPOLLOUT);
+                return true;
+            }
+            Unmap();
+            return false;
+        }
+        bytesToSend -= ret;
+        bytesHaveSent += ret;
+        if (bytesToSend <= bytesHaveSent)
+        {
+            Unmap();
+            if (m_linger)
+            {
+                Init();
+                Modifyfd(epollfd, m_sockfd, EPOLLIN);
+                return true;
+            }
+            else
+            {
+                Modifyfd(epollfd, m_sockfd, EPOLLIN);
+                return false;
+            }
+        }
+    }
 }
 
 namespace

@@ -5,12 +5,11 @@
 #include <map>
 #include <string>
 #include <fcntl.h>
+#include "unidef.h"
 
 class http_conn
 {
 public:
-    // 文件名最大长度
-    static const int FILENAME_LEN = 200;
     // 读缓冲区大小
     static const int READ_BUFFER_SIZE = 2048;
     // 写缓冲区大小
@@ -26,10 +25,6 @@ public:
     
     enum LINE_STATUS { LINE_OK = 0, LINE_BAD, LINE_OPEN };
 
-    enum HTTP_CODE { NO_REQUEST, GET_REQUEST, BAD_REQUEST, 
-                     NO_RESOURCE, FORBIDDEN_REQUEST, FILE_REQUEST,
-                     INTERNAL_ERROR, CLOSED_CONNECTION };
-    
     static int epollfd;
     static int userCount;
 
@@ -45,29 +40,32 @@ public:
     // 关闭连接
     void CloseConnection(bool realClose = true);
 
-    // 处理请求
-    void operator()();
-
     // 非阻塞读
     bool Read();
 
     // 非阻塞写
     bool Write();
 
+    // 入口函数
+    void operator()();
+
+    bool AddHeaders(const std::string& key, const std::string& value);
+
+    // 手动调用
+    bool SendResponse(int code, const std::string& title, const char* content, size_t len);
+
     // 获取首部字段
     // 用右值引用或const引用接收
     const std::map<std::string, std::string> GetHeaders() const;
-protected:
-    // 当收到完整的请求报文后做的处理
-    // 根据需要，重载此函数做相应处理
-    virtual HTTP_CODE DoRequest();
+protected:  
+    // 根据process read的应答添加HTTP应答
+    bool ProcessWrite(HTTP_CODE code);
 
 private:
+    void Init();
+
     // 解析请求
     HTTP_CODE ProcessRead();
-
-    // 添加HTTP应答
-    bool ProcessWrite(HTTP_CODE code);
 
     // 解析请求函数
     HTTP_CODE ParseRequestLine(char* text);
@@ -76,15 +74,17 @@ private:
     char* GetLine() { return m_readbuf + m_curlinePos; }
     LINE_STATUS ParseLine();
 
+    // 当获取完整的request后对uri的文件属性进行解析
+    HTTP_CODE DoRequest();
+
     // 应答函数
     void Unmap();
     bool AddResponse(const char* format, ...);
-    bool AddContent(const char* content);
+    bool AddResponseForm(const std::string& form);
     bool AddStatusLine(int status, const std::string& title);
-    bool AddHeaders(int contentLength);
-    bool AddContentLength(int contentLength);
     bool AddLinger();
     bool AddBlankLine();
+    bool AddResponseBody(const char* text, size_t size);
 
 private:
     // 对方的socket fd和地址
@@ -115,7 +115,7 @@ private:
     // url
     char* m_url;
     // 请求的文件路径
-    char* m_filePath;
+    std::string m_filePath;
     // 协议版本号
     char* m_version;
     // 主机名
@@ -134,7 +134,7 @@ private:
 
     // writev
     iovec m_iv[2];
-    int m_iv_count; 
+    int m_ivCount; 
 };
 
 #endif
