@@ -13,4 +13,7 @@ enum HTTP_CODE
     CLOSED_CONNECTION
 };
 
+// 根目录
+const string RootDir("/var/www/html");
+
 #endif

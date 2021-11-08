@@ -7,6 +7,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include "http_conn.h"
+#include "RequestFileHandler.h"
 
 using namespace std;
 namespace
@@ -22,8 +23,6 @@ namespace
     const string ERROR500("Internal Error");
     const string ERROR500FORM("There was an unusual problem serving the requested resource.\n");
 
-    // 根目录
-    const string RootDir("/var/www/html");
 
     inline int SetNonblocking(int fd);
 
@@ -65,7 +64,7 @@ void http_conn::Init()
     m_method = GET;
     m_url = nullptr;
     m_filePath.clear();
-    m_version = m_host = m_body = m_filemap = nullptr;
+    m_version = m_host = m_body = nullptr;
     m_contentLength = 0;
     m_checkedPos = m_curlinePos = 0;
     m_writeBytes = 0;
@@ -266,13 +265,13 @@ HTTP_CODE http_conn::ProcessRead()
                 if (result == BAD_REQUEST) 
                     return BAD_REQUEST;
                 else if (result == GET_REQUEST)
-                    return DoRequest();
+                    return GET_REQUEST;
                 break;
 
             case CHECK_STATE_CONTENT:
                 result = ParseContent(text);
                 if (result == GET_REQUEST)
-                    return DoRequest();
+                    return GET_REQUEST;
                 // content不完整，跳出大循环
                 lineStatus = LINE_OPEN;
                 break;
@@ -284,22 +283,36 @@ HTTP_CODE http_conn::ProcessRead()
     return NO_REQUEST;
 }
 
-HTTP_CODE http_conn::DoRequest()
+bool http_conn::DoRequest()
 {
-    if (stat(m_filePath.c_str(), &m_fileStat) < 0)
-        return NO_RESOURCE;
-    if (S_ISDIR(m_fileStat.st_mode))
-        return BAD_REQUEST;
-    if (!(m_fileStat.st_mode & S_IROTH))
-        return FORBIDDEN_REQUEST;
-    
-    int fd = open(m_filePath.c_str(), O_RDONLY);
-    if ((m_filemap = static_cast<char*>(mmap(nullptr, m_fileStat.st_size, 
-                                   PROT_READ, MAP_PRIVATE, fd, 0))) == MAP_FAILED)
-        return INTERNAL_ERROR;
+    // 先只做请求文件的处理，api后续再做
+    string filepath = RootDir + (strcmp(m_url, "/") == 0 ? "/index.html" : m_url);
+    if (!m_handler)
+        m_handler = std::make_unique<RequestFileHandler>(this, std::move(filepath)); 
 
-    close(fd);
-    return FILE_REQUEST;
+    return m_handler->HandleRequest();
+}
+
+bool http_conn::SendErrorCode(HTTP_CODE code)
+{
+    switch (code)
+    {
+        case INTERNAL_ERROR:
+            return SendResponse(500, ERROR500, ERROR500FORM.c_str(), ERROR500FORM.size());
+            break;
+        case BAD_REQUEST:
+            return SendResponse(400, ERROR400, ERROR400FORM.c_str(), ERROR400FORM.size());
+            break;
+        case NO_RESOURCE:
+            return SendResponse(404, ERROR404, ERROR404FORM.c_str(), ERROR404FORM.size());
+            break;
+        case FORBIDDEN_REQUEST:
+            return SendResponse(403, ERROR403, ERROR403FORM.c_str(), ERROR403FORM.size());
+            break;
+        default:
+            return false;
+    }
+    return false;
 }
 
 bool http_conn::AddResponse(const char* format, ...)
@@ -379,15 +392,6 @@ bool http_conn::ProcessWrite(HTTP_CODE code)
     }
 }
 
-void http_conn::Unmap()
-{
-    if (m_filemap)
-    {
-        munmap(m_filemap, m_fileStat.st_size);
-        m_filemap = nullptr;
-    }
-}
-
 bool http_conn::Write()
 {
     int ret = 0;
@@ -411,14 +415,14 @@ bool http_conn::Write()
                 Modifyfd(epollfd, m_sockfd, EPOLLOUT);
                 return true;
             }
-            Unmap();
+            //Unmap();
             return false;
         }
         bytesToSend -= ret;
         bytesHaveSent += ret;
         if (bytesToSend <= bytesHaveSent)
         {
-            Unmap();
+            //Unmap();
             if (m_linger)
             {
                 Init();

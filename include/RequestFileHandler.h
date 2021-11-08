@@ -2,6 +2,7 @@
 #define REQUEST_FILE_HANDLER_INCLUDED
 
 #include "RequestHandler.h"
+#include "Httpdef.h"
 #include <fcntl.h>
 #include <string>
 
@@ -14,11 +15,11 @@ public:
 
     ~RequestFileHandler();
 
-    void HandleRequest() override;
+    bool HandleRequest() override;
 
 private:
     // 分析文件属性
-    void GetFileStat();
+    HTTP_CODE GetFileStat();
 
     // 释放资源
     void Unmap();

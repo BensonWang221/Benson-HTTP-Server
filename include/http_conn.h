@@ -5,7 +5,10 @@
 #include <map>
 #include <string>
 #include <fcntl.h>
-#include "unidef.h"
+#include <memory>
+#include "Httpdef.h"
+
+class RequestHandler;
 
 class http_conn
 {
@@ -54,6 +57,9 @@ public:
     // 手动调用
     bool SendResponse(int code, const std::string& title, const char* content, size_t len);
 
+    // 返回错误
+    bool SendErrorCode(HTTP_CODE code);
+
     // 获取首部字段
     // 用右值引用或const引用接收
     const std::map<std::string, std::string> GetHeaders() const;
@@ -74,11 +80,9 @@ private:
     char* GetLine() { return m_readbuf + m_curlinePos; }
     LINE_STATUS ParseLine();
 
-    // 当获取完整的request后对uri的文件属性进行解析
-    HTTP_CODE DoRequest();
+    bool DoRequest();
 
     // 应答函数
-    void Unmap();
     bool AddResponse(const char* format, ...);
     bool AddResponseForm(const std::string& form);
     bool AddStatusLine(int status, const std::string& title);
@@ -87,6 +91,8 @@ private:
     bool AddResponseBody(const char* text, size_t size);
 
 private:
+    std::unique_ptr<RequestHandler> m_handler;
+
     // 对方的socket fd和地址
     int m_sockfd = -1;
     sockaddr_in m_address;
@@ -126,11 +132,6 @@ private:
     int m_contentLength = 0;
     // 是否长连接
     bool m_linger = false;
-
-    // mmap的位置
-    char* m_filemap = nullptr;
-    // 目标文件状态
-    struct stat m_fileStat;
 
     // writev
     iovec m_iv[2];

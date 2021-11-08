@@ -10,7 +10,7 @@ public:
 
     virtual ~RequestHandler() {}
 
-    virtual void HandleRequest() = 0;
+    virtual bool HandleRequest() = 0;
 
 protected:
     http_conn* m_conn = nullptr;
