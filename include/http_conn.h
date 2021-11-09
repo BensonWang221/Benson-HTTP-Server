@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <memory>
 #include "Httpdef.h"
+#include "RequestHandler.h"
 
 class RequestHandler;
 
@@ -33,7 +34,7 @@ public:
 
 public:
     // default constructor
-    http_conn();
+    http_conn() = default;
     // destructor
     virtual ~http_conn() {}
 
@@ -64,8 +65,6 @@ public:
     // 用右值引用或const引用接收
     const std::map<std::string, std::string> GetHeaders() const;
 protected:  
-    // 根据process read的应答添加HTTP应答
-    bool ProcessWrite(HTTP_CODE code);
 
 private:
     void Init();
@@ -84,11 +83,11 @@ private:
 
     // 应答函数
     bool AddResponse(const char* format, ...);
-    bool AddResponseForm(const std::string& form);
     bool AddStatusLine(int status, const std::string& title);
     bool AddLinger();
     bool AddBlankLine();
     bool AddResponseBody(const char* text, size_t size);
+    bool AddErrorTitleForm(const int code, const std::string& title, const std::string& form);
 
 private:
     std::unique_ptr<RequestHandler> m_handler;

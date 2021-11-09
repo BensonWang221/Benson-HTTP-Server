@@ -6,6 +6,7 @@
 #include <sys/epoll.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <memory>
 #include "http_conn.h"
 #include "RequestFileHandler.h"
 
@@ -23,25 +24,17 @@ namespace
     const string ERROR500("Internal Error");
     const string ERROR500FORM("There was an unusual problem serving the requested resource.\n");
 
-
-    inline int SetNonblocking(int fd);
-
-    inline void Addfd(int epollfd, int fd, bool oneshot);
-
-    inline void Removefd(int epollfd, int fd);
-
-    inline void Modifyfd(int epollfd, int fd, int ev);
 }
+inline int SetNonblocking(int fd);
+
+inline void Addfd(int epollfd, int fd, bool oneshot);
+
+inline void Removefd(int epollfd, int fd);
+
+inline void Modifyfd(int epollfd, int fd, int ev);
 
 int http_conn::epollfd = -1;
 int http_conn::userCount = 0;
-
-http_conn::http_conn()
-{
-    bzero(&m_address, sizeof(m_address));
-    bzero(m_readbuf, sizeof(m_readbuf));
-    bzero(m_writebuf, sizeof(m_writebuf));
-}
 
 void http_conn::Init(int sockfd, const sockaddr_in &addr)
 {
@@ -55,6 +48,7 @@ void http_conn::Init(int sockfd, const sockaddr_in &addr)
 #endif
     Addfd(epollfd, sockfd, true);
     ++userCount;
+    Init();
 }
 
 void http_conn::Init()
@@ -70,6 +64,10 @@ void http_conn::Init()
     m_writeBytes = 0;
     bzero(m_readbuf, sizeof(m_readbuf));
     bzero(m_writebuf, sizeof(m_writebuf));
+    bzero(&m_address, sizeof(m_address));
+    bzero(m_readbuf, sizeof(m_readbuf));
+    bzero(m_writebuf, sizeof(m_writebuf));
+    m_handler.reset();
 }
 
 void http_conn::CloseConnection(bool realClose)
@@ -79,6 +77,8 @@ void http_conn::CloseConnection(bool realClose)
         Removefd(epollfd, m_sockfd);
         --userCount;
         m_sockfd = -1;
+        if (m_handler)
+            m_handler.reset();
     }
 }
 
@@ -243,41 +243,40 @@ HTTP_CODE http_conn::ProcessRead()
 {
     LINE_STATUS lineStatus = LINE_OK;
     HTTP_CODE result = NO_REQUEST;
-    char* text = nullptr;
+    char *text = nullptr;
 
     // 该解析请求正文后就不需要parse line了
     // check content时判断linestatus是因为content内容没有全部收到时也不再循环
-    while((m_checkState == CHECK_STATE_CONTENT && lineStatus == LINE_OK)
-           || ((lineStatus = ParseLine()) == LINE_OK))
+    while ((m_checkState == CHECK_STATE_CONTENT && lineStatus == LINE_OK) || ((lineStatus = ParseLine()) == LINE_OK))
     {
         text = GetLine();
         m_curlinePos = m_checkedPos;
         switch (m_checkState)
         {
-            case CHECK_STATE_REQUESTLINE:
-                result = ParseRequestLine(text);
-                if (result == BAD_REQUEST)
-                    return BAD_REQUEST;
-                break;
+        case CHECK_STATE_REQUESTLINE:
+            result = ParseRequestLine(text);
+            if (result == BAD_REQUEST)
+                return BAD_REQUEST;
+            break;
 
-            case CHECK_STATE_HEADER:
-                result = ParseHeaders(text);
-                if (result == BAD_REQUEST) 
-                    return BAD_REQUEST;
-                else if (result == GET_REQUEST)
-                    return GET_REQUEST;
-                break;
+        case CHECK_STATE_HEADER:
+            result = ParseHeaders(text);
+            if (result == BAD_REQUEST)
+                return BAD_REQUEST;
+            else if (result == GET_REQUEST)
+                return GET_REQUEST;
+            break;
 
-            case CHECK_STATE_CONTENT:
-                result = ParseContent(text);
-                if (result == GET_REQUEST)
-                    return GET_REQUEST;
-                // content不完整，跳出大循环
-                lineStatus = LINE_OPEN;
-                break;
-            
-            default:
-                return INTERNAL_ERROR;
+        case CHECK_STATE_CONTENT:
+            result = ParseContent(text);
+            if (result == GET_REQUEST)
+                return GET_REQUEST;
+            // content不完整，跳出大循环
+            lineStatus = LINE_OPEN;
+            break;
+
+        default:
+            return INTERNAL_ERROR;
         }
     }
     return NO_REQUEST;
@@ -288,7 +287,7 @@ bool http_conn::DoRequest()
     // 先只做请求文件的处理，api后续再做
     string filepath = RootDir + (strcmp(m_url, "/") == 0 ? "/index.html" : m_url);
     if (!m_handler)
-        m_handler = std::make_unique<RequestFileHandler>(this, std::move(filepath)); 
+        m_handler = unique_ptr<RequestFileHandler>(new RequestFileHandler(this, std::move(filepath)));
 
     return m_handler->HandleRequest();
 }
@@ -297,25 +296,34 @@ bool http_conn::SendErrorCode(HTTP_CODE code)
 {
     switch (code)
     {
-        case INTERNAL_ERROR:
-            return SendResponse(500, ERROR500, ERROR500FORM.c_str(), ERROR500FORM.size());
-            break;
-        case BAD_REQUEST:
-            return SendResponse(400, ERROR400, ERROR400FORM.c_str(), ERROR400FORM.size());
-            break;
-        case NO_RESOURCE:
-            return SendResponse(404, ERROR404, ERROR404FORM.c_str(), ERROR404FORM.size());
-            break;
-        case FORBIDDEN_REQUEST:
-            return SendResponse(403, ERROR403, ERROR403FORM.c_str(), ERROR403FORM.size());
-            break;
-        default:
-            return false;
+    case INTERNAL_ERROR:
+        return AddErrorTitleForm(500, ERROR500, ERROR500FORM.c_str());
+        break;
+    case BAD_REQUEST:
+        return AddErrorTitleForm(400, ERROR400, ERROR400FORM.c_str());
+        break;
+    case NO_RESOURCE:
+        return AddErrorTitleForm(404, ERROR404, ERROR404FORM.c_str());
+        break;
+    case FORBIDDEN_REQUEST:
+        return AddErrorTitleForm(403, ERROR403, ERROR403FORM.c_str());
+        break;
+    default:
+        return false;
     }
     return false;
 }
 
-bool http_conn::AddResponse(const char* format, ...)
+bool http_conn::AddErrorTitleForm(const int code, const string &title, const string &form)
+{
+    return (AddStatusLine(code, title) &&
+            AddHeaders("Content-Length", to_string(form.size())) &&
+            AddLinger() &&
+            AddBlankLine() &&
+            AddResponse("%s", form.c_str()));
+}
+
+bool http_conn::AddResponse(const char *format, ...)
 {
     if (m_writeBytes >= WRITE_BUFFER_SIZE)
         return false;
@@ -323,7 +331,7 @@ bool http_conn::AddResponse(const char* format, ...)
     va_start(argList, format);
     int len = vsnprintf(m_writebuf + m_writeBytes, WRITE_BUFFER_SIZE - m_writeBytes - 1,
                         format, argList);
-    
+
     // 要留出\r\n的空行
     if (len >= WRITE_BUFFER_SIZE - m_writeBytes - 3)
         return false;
@@ -332,12 +340,12 @@ bool http_conn::AddResponse(const char* format, ...)
     return true;
 }
 
-bool http_conn::AddStatusLine(int status, const string& title)
+bool http_conn::AddStatusLine(int status, const string &title)
 {
     return AddResponse("%s %d %s\r\n", "HTTP/1.1", status, title.c_str());
 }
 
-bool http_conn::AddHeaders(const string& key, const string& value)
+bool http_conn::AddHeaders(const string &key, const string &value)
 {
     if (AddResponse("%s: %s\r\n", key.c_str(), value.c_str()))
     {
@@ -359,37 +367,21 @@ bool http_conn::AddBlankLine()
     AddResponse("%s", "\r\n");
 }
 
-bool http_conn::AddResponseForm(const string& form)
+bool http_conn::AddResponseBody(const char *text, size_t size)
 {
-    AddHeaders("Content-Length", to_string(form.size()));
-    AddResponseBody(form.c_str(), form.size());
+    AddHeaders("Content-Length", to_string(size));
+    m_iv[0].iov_base = m_writebuf;
+    m_iv[0].iov_len = m_writeBytes;
+    m_iv[1].iov_base = const_cast<char *>(text);
+    m_iv[1].iov_len = size;
+    m_writeBytes += size;
 }
 
-bool http_conn::AddResponseBody(const char* text, size_t size)
+bool http_conn::SendResponse(int code, const string &title, const char *content, size_t len)
 {
-
-}
-
-bool http_conn::SendResponse(int code, const string& title, const char* content, size_t len)
-{
-
-}
-
-bool http_conn::ProcessWrite(HTTP_CODE code)
-{
-    switch(code)
-    {
-        case INTERNAL_ERROR:
-            AddStatusLine(500, ERROR500);
-            if (!AddResponseForm(ERROR500FORM))
-                return false;
-            break;
-        case BAD_REQUEST:
-            AddStatusLine(400, ERROR400);
-            if (!AddResponseForm(ERROR400FORM))
-                return false;
-            break;
-    }
+    AddStatusLine(code, title);
+    AddLinger();
+    AddResponseBody(content, len);
 }
 
 bool http_conn::Write()
@@ -397,7 +389,7 @@ bool http_conn::Write()
     int ret = 0;
     int bytesToSend = m_writeBytes,
         bytesHaveSent = 0;
-    
+
     if (bytesToSend == 0)
     {
         Modifyfd(epollfd, m_sockfd, EPOLLIN);
@@ -415,14 +407,15 @@ bool http_conn::Write()
                 Modifyfd(epollfd, m_sockfd, EPOLLOUT);
                 return true;
             }
-            //Unmap();
+            m_handler.reset();
             return false;
         }
         bytesToSend -= ret;
         bytesHaveSent += ret;
         if (bytesToSend <= bytesHaveSent)
         {
-            //Unmap();
+            // 已经处理完毕，释放handler资源
+            m_handler.reset();
             if (m_linger)
             {
                 Init();
@@ -438,38 +431,54 @@ bool http_conn::Write()
     }
 }
 
-namespace
+void http_conn::operator()()
 {
-    int SetNonblocking(int fd)
+    HTTP_CODE readRet = ProcessRead();
+    bool writeRet = false;
+    switch (readRet)
     {
-        int oldFlag = fcntl(fd, F_GETFL);
-        int newFlag = oldFlag |= O_NONBLOCK;
-        fcntl(fd, F_SETFL, newFlag);
-        return oldFlag;
+    case NO_REQUEST:
+        Modifyfd(epollfd, m_sockfd, EPOLLIN);
+        return;
+    case GET_REQUEST:
+        writeRet = DoRequest();
+        break;
+    default:
+        writeRet = SendErrorCode(readRet);
     }
+    if (!writeRet)
+        CloseConnection();
+}
 
-    void Addfd(int epollfd, int fd, bool oneshot)
-    {
-        epoll_event event;
-        event.data.fd = fd;
-        event.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
-        if (oneshot)
-            event.events |= EPOLLONESHOT;
-        epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event);
-        SetNonblocking(fd);
-    }
+int SetNonblocking(int fd)
+{
+    int oldFlag = fcntl(fd, F_GETFL);
+    int newFlag = oldFlag |= O_NONBLOCK;
+    fcntl(fd, F_SETFL, newFlag);
+    return oldFlag;
+}
 
-    void Removefd(int epollfd, int fd)
-    {
-        epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, nullptr);
-        close(fd);
-    }
+void Addfd(int epollfd, int fd, bool oneshot)
+{
+    epoll_event event;
+    event.data.fd = fd;
+    event.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
+    if (oneshot)
+        event.events |= EPOLLONESHOT;
+    epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event);
+    SetNonblocking(fd);
+}
 
-    void Modifyfd(int epollfd, int fd, int ev)
-    {
-        epoll_event event;
-        event.data.fd = fd;
-        event.events = ev | EPOLLET | EPOLLONESHOT | EPOLLRDHUP;
-        epoll_ctl(epollfd, EPOLL_CTL_MOD, fd, &event);
-    }
+void Removefd(int epollfd, int fd)
+{
+    epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, nullptr);
+    close(fd);
+}
+
+void Modifyfd(int epollfd, int fd, int ev)
+{
+    epoll_event event;
+    event.data.fd = fd;
+    event.events = ev | EPOLLET | EPOLLONESHOT | EPOLLRDHUP;
+    epoll_ctl(epollfd, EPOLL_CTL_MOD, fd, &event);
 }

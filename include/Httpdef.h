@@ -1,6 +1,7 @@
 #ifndef UNIDEF_INCLUDED
 #define UNIDEF_INCLUDED
 
+#include <string>
 enum HTTP_CODE
 {
     NO_REQUEST,
@@ -14,6 +15,5 @@ enum HTTP_CODE
 };
 
 // 根目录
-const string RootDir("/var/www/html");
-
+const std::string RootDir("./www/html");
 #endif
