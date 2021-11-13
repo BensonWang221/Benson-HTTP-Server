@@ -7,6 +7,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <memory>
+#include <iostream>
 #include "http_conn.h"
 #include "RequestFileHandler.h"
 
@@ -57,11 +58,11 @@ void http_conn::Init()
     m_linger = false;
     m_method = GET;
     m_url = nullptr;
-    m_filePath.clear();
     m_version = m_host = m_body = nullptr;
     m_contentLength = 0;
-    m_checkedPos = m_curlinePos = 0;
-    m_writeBytes = 0;
+    m_checkedPos = m_curlinePos = m_readPos = 0;
+    m_writeBytes = m_statusBytes = 0;
+    m_ivCount = 1;
     bzero(m_readbuf, sizeof(m_readbuf));
     bzero(m_writebuf, sizeof(m_writebuf));
     bzero(&m_address, sizeof(m_address));
@@ -241,6 +242,7 @@ HTTP_CODE http_conn::ParseContent(char *text)
 
 HTTP_CODE http_conn::ProcessRead()
 {
+    printf("http_conn::ProcessRead..\n");
     LINE_STATUS lineStatus = LINE_OK;
     HTTP_CODE result = NO_REQUEST;
     char *text = nullptr;
@@ -250,6 +252,7 @@ HTTP_CODE http_conn::ProcessRead()
     while ((m_checkState == CHECK_STATE_CONTENT && lineStatus == LINE_OK) || ((lineStatus = ParseLine()) == LINE_OK))
     {
         text = GetLine();
+        std::cout << text << std::endl;
         m_curlinePos = m_checkedPos;
         switch (m_checkState)
         {
@@ -264,13 +267,13 @@ HTTP_CODE http_conn::ProcessRead()
             if (result == BAD_REQUEST)
                 return BAD_REQUEST;
             else if (result == GET_REQUEST)
-                return GET_REQUEST;
+                return DoRequest();
             break;
 
         case CHECK_STATE_CONTENT:
             result = ParseContent(text);
             if (result == GET_REQUEST)
-                return GET_REQUEST;
+                return DoRequest();
             // content不完整，跳出大循环
             lineStatus = LINE_OPEN;
             break;
@@ -282,7 +285,7 @@ HTTP_CODE http_conn::ProcessRead()
     return NO_REQUEST;
 }
 
-bool http_conn::DoRequest()
+HTTP_CODE http_conn::DoRequest()
 {
     // 先只做请求文件的处理，api后续再做
     string filepath = RootDir + (strcmp(m_url, "/") == 0 ? "/index.html" : m_url);
@@ -316,11 +319,11 @@ bool http_conn::SendErrorCode(HTTP_CODE code)
 
 bool http_conn::AddErrorTitleForm(const int code, const string &title, const string &form)
 {
-    return (AddStatusLine(code, title) &&
-            AddHeaders("Content-Length", to_string(form.size())) &&
-            AddLinger() &&
-            AddBlankLine() &&
-            AddResponse("%s", form.c_str()));
+    bool ret = (AddStatusLine(code, title) &&
+                AddHeaders("Content-Length", to_string(form.size())) &&
+                AddLinger() &&
+                AddBlankLine() &&
+                AddResponse("%s", form.c_str()));
 }
 
 bool http_conn::AddResponse(const char *format, ...)
@@ -329,7 +332,7 @@ bool http_conn::AddResponse(const char *format, ...)
         return false;
     va_list argList;
     va_start(argList, format);
-    int len = vsnprintf(m_writebuf + m_writeBytes, WRITE_BUFFER_SIZE - m_writeBytes - 1,
+    int len = vsnprintf(m_writebuf + m_writeBytes + offset, WRITE_BUFFER_SIZE - m_writeBytes - 1,
                         format, argList);
 
     // 要留出\r\n的空行
@@ -342,7 +345,10 @@ bool http_conn::AddResponse(const char *format, ...)
 
 bool http_conn::AddStatusLine(int status, const string &title)
 {
-    return AddResponse("%s %d %s\r\n", "HTTP/1.1", status, title.c_str());
+    string statusLine = (to_string(status) + " HTTP/1.1 ") + title + "\r\n";
+    m_statusBytes = statusLine.size();
+    memcpy(m_writebuf + offset - m_statusBytes, statusLine.c_str(), m_statusBytes);
+    return true;
 }
 
 bool http_conn::AddHeaders(const string &key, const string &value)
@@ -350,8 +356,8 @@ bool http_conn::AddHeaders(const string &key, const string &value)
     if (AddResponse("%s: %s\r\n", key.c_str(), value.c_str()))
     {
         // 每次加header之后，就把后面两个位置设置为\r\n
-        m_writebuf[m_writeBytes] = '\r';
-        m_writebuf[m_writeBytes + 1] = '\n';
+        m_writebuf[m_writeBytes + offset] = '\r';
+        m_writebuf[m_writeBytes + 1 + offset] = '\n';
         return true;
     }
     return false;
@@ -359,7 +365,7 @@ bool http_conn::AddHeaders(const string &key, const string &value)
 
 bool http_conn::AddLinger()
 {
-    return AddHeaders("Connection:", m_linger ? "keep-alive" : "close");
+    return AddHeaders("Connection", m_linger ? "keep-alive" : "close");
 }
 
 bool http_conn::AddBlankLine()
@@ -370,18 +376,56 @@ bool http_conn::AddBlankLine()
 bool http_conn::AddResponseBody(const char *text, size_t size)
 {
     AddHeaders("Content-Length", to_string(size));
-    m_iv[0].iov_base = m_writebuf;
-    m_iv[0].iov_len = m_writeBytes;
-    m_iv[1].iov_base = const_cast<char *>(text);
-    m_iv[1].iov_len = size;
-    m_writeBytes += size;
 }
 
 bool http_conn::SendResponse(int code, const string &title, const char *content, size_t len)
 {
-    AddStatusLine(code, title);
-    AddLinger();
-    AddResponseBody(content, len);
+    bool ret = (AddStatusLine(code, title) &&
+                AddLinger() &&
+                AddResponseBody(content, len));
+    if (ret)
+    {
+        m_iv[0].iov_base = m_writebuf + offset - m_statusBytes;
+        m_iv[0].iov_len = m_statusBytes + m_writeBytes + 2;
+        m_iv[1].iov_base = const_cast<char*>(content);
+        m_iv[1].iov_len = len;
+        m_ivCount = 2;
+        m_writeBytes = m_writeBytes + m_statusBytes + len + 2;
+    }   
+    return ret;
+}
+
+bool http_conn::ProcessWrite(HTTP_CODE code)
+{
+    switch (code)
+    {
+    case INTERNAL_ERROR:
+        if (!AddErrorTitleForm(500, ERROR500, ERROR500FORM))
+            return false;
+        break;
+    case BAD_REQUEST:
+        if (!AddErrorTitleForm(400, ERROR400, ERROR400FORM))
+            return false;
+        break;
+    case NO_RESOURCE:
+        if (!AddErrorTitleForm(404, ERROR404, ERROR404FORM))
+            return false;
+        break;
+    case FORBIDDEN_REQUEST:
+        if (!AddErrorTitleForm(403, ERROR403, ERROR403FORM))
+            return false;
+        break;
+    case FILE_REQUEST:
+        return true;
+    default:
+        return false;
+    }
+    m_iv[0].iov_base = m_writebuf + offset - m_statusBytes;
+    // 将\r\n加进去
+    m_iv[0].iov_len = m_statusBytes + m_writeBytes + 2;
+    m_ivCount = 1;
+    m_writeBytes += (m_statusBytes + 2);
+    return true;
 }
 
 bool http_conn::Write()
@@ -433,21 +477,17 @@ bool http_conn::Write()
 
 void http_conn::operator()()
 {
+    printf("http_conn:: operator()..\n");
     HTTP_CODE readRet = ProcessRead();
-    bool writeRet = false;
-    switch (readRet)
+    if (readRet == NO_REQUEST)
     {
-    case NO_REQUEST:
         Modifyfd(epollfd, m_sockfd, EPOLLIN);
         return;
-    case GET_REQUEST:
-        writeRet = DoRequest();
-        break;
-    default:
-        writeRet = SendErrorCode(readRet);
     }
-    if (!writeRet)
+    if (!ProcessWrite(readRet))
         CloseConnection();
+    else
+        Modifyfd(epollfd, m_sockfd, EPOLLOUT);
 }
 
 int SetNonblocking(int fd)

@@ -6,6 +6,7 @@
 #include <string>
 #include <fcntl.h>
 #include <memory>
+#include <vector>
 #include "Httpdef.h"
 #include "RequestHandler.h"
 
@@ -32,6 +33,9 @@ public:
     static int epollfd;
     static int userCount;
 
+    // 为状态行预留的offset
+    static const int offset = 128;
+
 public:
     // default constructor
     http_conn() = default;
@@ -54,6 +58,8 @@ public:
     void operator()();
 
     bool AddHeaders(const std::string& key, const std::string& value);
+
+    bool AddStatusLine(int status, const std::string& title);
 
     // 手动调用
     bool SendResponse(int code, const std::string& title, const char* content, size_t len);
@@ -79,11 +85,12 @@ private:
     char* GetLine() { return m_readbuf + m_curlinePos; }
     LINE_STATUS ParseLine();
 
-    bool DoRequest();
+    HTTP_CODE DoRequest();
+
+    bool ProcessWrite(HTTP_CODE code);
 
     // 应答函数
     bool AddResponse(const char* format, ...);
-    bool AddStatusLine(int status, const std::string& title);
     bool AddLinger();
     bool AddBlankLine();
     bool AddResponseBody(const char* text, size_t size);
@@ -99,16 +106,17 @@ private:
     // 读缓冲区
     char m_readbuf[READ_BUFFER_SIZE];
     // 已经读到的数据长度
-    int m_readPos = -1;
+    int m_readPos = 0;
     // 正在解析的数据位置
-    int m_checkedPos = -1;
+    int m_checkedPos = 0;
     // 当前解析行的起始数据位置
-    int m_curlinePos = -1;
+    int m_curlinePos = 0;
 
     // 写缓冲区
-    char m_writebuf[WRITE_BUFFER_SIZE];
-    // 待发送字节数
-    int m_writeBytes;
+    char m_writebuf[WRITE_BUFFER_SIZE + offset];
+    int m_statusBytes = 0;
+    // 首部字段字节数
+    int m_writeBytes = 0;
 
     // 主状态机当前状态
     CHECK_STATE m_checkState = CHECK_STATE_REQUESTLINE;
@@ -119,8 +127,6 @@ private:
 
     // url
     char* m_url;
-    // 请求的文件路径
-    std::string m_filePath;
     // 协议版本号
     char* m_version;
     // 主机名
@@ -134,7 +140,7 @@ private:
 
     // writev
     iovec m_iv[2];
-    int m_ivCount; 
+    int m_ivCount = 1; 
 };
 
 #endif

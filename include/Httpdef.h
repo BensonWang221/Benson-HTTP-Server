@@ -15,5 +15,5 @@ enum HTTP_CODE
 };
 
 // 根目录
-const std::string RootDir("./www/html");
+const std::string RootDir("/www/html");
 #endif

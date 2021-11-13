@@ -25,13 +25,15 @@ namespace
     int pipefd[2];
 
     const int MaxEventsNumber = 10000;
+
+    const int MaxFd = 65536;
 }
 
 HttpServer::HttpServer() : m_ip("127.0.0.1"), m_port(8080)
 {
 }
 
-HttpServer::HttpServer(const string& ip, const short port): m_ip(move(ip)), m_port(port)
+HttpServer::HttpServer(const string &ip, const short port) : m_ip(move(ip)), m_port(port)
 {
 }
 
@@ -41,14 +43,17 @@ bool HttpServer::Init()
 
     // 统一事件源，处理SIGINT
     AddSig(SIGINT, StopSignal);
-    
+
     // 初始化线程池
     m_threadPool = unique_ptr<ThreadPool>(new ThreadPool());
 
     m_listenfd = socket(AF_INET, SOCK_STREAM, 0);
     assert(m_listenfd >= 0);
     // SO_LINGER,控制关闭时未发送完的数据的行为
-    struct linger temp{0, 1};
+    struct linger temp
+    {
+        0, 1
+    };
     setsockopt(m_listenfd, SOL_SOCKET, SO_LINGER, &temp, sizeof(temp));
 
     sockaddr_in address;
@@ -57,27 +62,40 @@ bool HttpServer::Init()
     inet_pton(AF_INET, m_ip.c_str(), &address.sin_addr);
     address.sin_port = htons(m_port);
     int ret;
-    ret = bind(m_listenfd, (sockaddr*)&address, sizeof(address));
-    assert(ret != -1);
-
     ret = socketpair(AF_UNIX, SOCK_STREAM, 0, pipefd);
+    assert(ret != -1);
+    int reuse = 1;
+    setsockopt(m_listenfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    ret = bind(m_listenfd, (sockaddr *)&address, sizeof(address));
     assert(ret != -1);
 
     ret = listen(m_listenfd, 50);
     assert(ret != -1);
 
+    try {
+        m_clients = new http_conn[MaxFd];
+    }
+    catch (...)
+    {
+        std::cout <<"new error\n" << std::endl;
+        exit(1);
+    }
+
     m_epollfd = epoll_create(5);
     assert(m_epollfd != -1);
     Addfd(m_epollfd, m_listenfd, false);
+    Addfd(m_epollfd, pipefd[0], false);
     http_conn::epollfd = m_epollfd;
 }
 
 void HttpServer::Run()
 {
+    printf("Starting server...\n");
     Init();
     int activeNum = 0;
     epoll_event events[MaxEventsNumber];
-    while(m_running)
+    m_running = true;
+    while (m_running)
     {
         activeNum = epoll_wait(m_epollfd, events, MaxEventsNumber, -1);
         // 统一事件源，判断errno非EINTR即出错
@@ -89,9 +107,66 @@ void HttpServer::Run()
 
         for (int i = 0; i < activeNum; ++i)
         {
-            
+            int fd = events[i].data.fd;
+            if (fd == m_listenfd)
+            {
+                // listenfd也要循环读取
+                int connfd;
+                sockaddr_in connAddress;
+                socklen_t len;
+                do
+                {
+                    connfd = accept(fd, (sockaddr *)&connAddress, &len);
+                    if (connfd == -1)
+                    {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK)
+                            break;
+                        printf("accept error\n");
+                        break;
+                    }
+                    if (http_conn::userCount >= MaxFd)
+                    {
+                        send(connfd, "Full", 4, 0);
+                        close(connfd);
+                        break;
+                    }
+                    m_clients[connfd].Init(connfd, connAddress);
+                } while (true);
+            }
+            else if (fd == pipefd[0])
+            {
+                m_running = false;
+                break;
+            }
+            else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
+                m_clients[fd].CloseConnection();
+            else if (events[i].events & EPOLLIN)
+            {
+                if (m_clients[fd].Read())
+                {
+                    http_conn &conn = m_clients[fd];
+                    auto task = [&conn]()
+                    { conn(); };
+                    m_threadPool->AddTask(task);
+                }
+                else
+                    m_clients[fd].CloseConnection();
+            }
+            else if (events[i].events & EPOLLOUT)
+            {
+                if (!m_clients[fd].Write())
+                    m_clients[fd].CloseConnection();
+            }
         }
     }
+    m_threadPool->Stop();
+    m_stopSem.Post();
+    printf("Closing server...\n");
+
+    close(m_epollfd);
+    close(m_listenfd);
+    delete[] m_clients;
+
 }
 
 void HttpServer::Stop()

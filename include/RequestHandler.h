@@ -1,6 +1,8 @@
 #ifndef REQUEST_HANDLER_INCLUDED
 #define REQUEST_HANDLER_INCLUDED
 
+#include "Httpdef.h"
+
 class http_conn;
 
 class RequestHandler
@@ -10,7 +12,7 @@ public:
 
     virtual ~RequestHandler() {}
 
-    virtual bool HandleRequest() = 0;
+    virtual HTTP_CODE HandleRequest() = 0;
 
 protected:
     http_conn* m_conn = nullptr;

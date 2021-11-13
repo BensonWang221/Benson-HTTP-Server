@@ -44,11 +44,27 @@ HTTP_CODE RequestFileHandler::GetFileStat()
     return FILE_REQUEST;
 }
 
-bool RequestFileHandler::HandleRequest()
+HTTP_CODE RequestFileHandler::HandleRequest()
 {
     HTTP_CODE retcode = GetFileStat();
     if (retcode == FILE_REQUEST)
-        return m_conn->SendResponse(200, "OK", m_filemap, m_fileStat.st_size);
-    
-    return m_conn->SendErrorCode(retcode);
+    {
+        size_t pos = m_filePath.rfind('.');
+        if (pos == string::npos)
+            return INTERNAL_ERROR;
+            
+        auto postfix = m_filePath.substr(pos + 1);
+        string contentType;
+        if (postfix == "jpg" || postfix == "gif" || postfix == "png")
+            contentType = "image/" + postfix;
+        else if (postfix == "zip")
+            contentType = "application/zip";
+        else if (postfix == "html" || postfix == "css")
+            contentType = "text/" + postfix;
+        m_conn->AddHeaders("Content-Type", contentType);
+
+        if (!m_conn->SendResponse(200, "OK", m_filemap, m_fileStat.st_size))
+            retcode = INTERNAL_ERROR;
+    }
+    return retcode;
 }
