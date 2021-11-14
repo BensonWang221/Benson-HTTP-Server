@@ -5,6 +5,7 @@
 #include <functional>
 #include <mutex>
 #include <memory>
+#include "locker.h"
 #include "SyncQueue.h"
 
 class ThreadPool
@@ -22,6 +23,10 @@ public:
 
     void AddTask(const Task& task);
 
+    #ifdef TEST
+    size_t GetTasksInQueue();
+    #endif
+
 private:
     void Start(int numThreads);
 
@@ -32,7 +37,7 @@ private:
 private:
     std::vector<std::shared_ptr<std::thread>> m_threadGroup;
     SyncQueue<Task> m_queue;
-    std::atomic_bool m_running;
+    MyRWLock<bool> m_running;
     std::once_flag m_onceFlag;
 };
 #endif

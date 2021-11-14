@@ -1,7 +1,7 @@
 target=app
 src=$(wildcard ./src/*.cpp ./*.cpp)
 obj=$(patsubst %.cpp, %.o, $(src))
-flags=-std=c++11 -g -Iinclude -lpthread -DTEST
+flags=-std=c++11 -Iinclude -lpthread -DTEST -O2 -g
 
 $(target) : $(obj)
 	g++ $^ -o $@ $(flags)

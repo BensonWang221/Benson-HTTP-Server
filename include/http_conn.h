@@ -10,6 +10,9 @@
 #include "Httpdef.h"
 #include "RequestHandler.h"
 
+void Addfd(int epollfd, int fd, bool oneshot);
+void Removefd(int epollfd, int fd);
+
 class RequestHandler;
 
 class http_conn

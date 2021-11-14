@@ -9,6 +9,7 @@
 #include <string.h>
 #include <arpa/inet.h>
 #include "server.h"
+#include "Timer.h"
 
 using namespace std;
 
@@ -20,6 +21,10 @@ namespace
     void AddSig(int sig, void(handler)(int), bool restart = true);
 
     void StopSignal(int signal);
+
+#ifdef TEST
+    atomic_int messageCount{0};
+#endif
 
     // 统一事件源，通过信号使server stop
     int pipefd[2];
@@ -72,12 +77,14 @@ bool HttpServer::Init()
     ret = listen(m_listenfd, 50);
     assert(ret != -1);
 
-    try {
+    try
+    {
         m_clients = new http_conn[MaxFd];
     }
     catch (...)
     {
-        std::cout <<"new error\n" << std::endl;
+        std::cout << "new error\n"
+                  << std::endl;
         exit(1);
     }
 
@@ -97,6 +104,9 @@ void HttpServer::Run()
     m_running = true;
     while (m_running)
     {
+#ifdef TEST
+        MessagePerSec();
+#endif
         activeNum = epoll_wait(m_epollfd, events, MaxEventsNumber, -1);
         // 统一事件源，判断errno非EINTR即出错
         if (activeNum < 0 && errno != EINTR)
@@ -113,16 +123,22 @@ void HttpServer::Run()
                 // listenfd也要循环读取
                 int connfd;
                 sockaddr_in connAddress;
-                socklen_t len;
-                do
+                while (true)
                 {
-                    connfd = accept(fd, (sockaddr *)&connAddress, &len);
+                    socklen_t len;
+                    connfd = accept(m_listenfd, (sockaddr *)&connAddress, &len);
                     if (connfd == -1)
                     {
                         if (errno == EAGAIN || errno == EWOULDBLOCK)
                             break;
-                        printf("accept error\n");
-                        break;
+                        else if (errno == EINTR)
+                            continue;
+                        else
+                        {
+                            perror("accept error.");
+                            printf("errno = %d\n", errno);
+                            exit(1);
+                        }
                     }
                     if (http_conn::userCount >= MaxFd)
                     {
@@ -131,7 +147,7 @@ void HttpServer::Run()
                         break;
                     }
                     m_clients[connfd].Init(connfd, connAddress);
-                } while (true);
+                }
             }
             else if (fd == pipefd[0])
             {
@@ -156,6 +172,9 @@ void HttpServer::Run()
             {
                 if (!m_clients[fd].Write())
                     m_clients[fd].CloseConnection();
+#ifdef TEST
+                messageCount++;
+#endif
             }
         }
     }
@@ -166,7 +185,6 @@ void HttpServer::Run()
     close(m_epollfd);
     close(m_listenfd);
     delete[] m_clients;
-
 }
 
 void HttpServer::Stop()
@@ -184,6 +202,22 @@ HttpServer::~HttpServer()
     if (m_epollfd != -1)
         close(m_epollfd);
 }
+
+#ifdef TEST
+void HttpServer::MessagePerSec()
+{
+    static MyTimer timer;
+    auto timePeriod = timer.GetElapsedTimeInSecond();
+
+    if (timePeriod >= 1.0)
+    {
+        printf("message per second: %lf, tasks in queue: %lu\n", messageCount / timePeriod,
+               m_threadPool->GetTasksInQueue());
+        timer.Update();
+        messageCount = 0;
+    }
+}
+#endif
 
 namespace
 {
@@ -206,4 +240,5 @@ namespace
         send(pipefd[1], &msg, 1, 0);
         errno = saveError;
     }
+
 }

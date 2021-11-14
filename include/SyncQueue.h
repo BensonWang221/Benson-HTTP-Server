@@ -22,7 +22,7 @@ public:
     void Take(T &task);
 
     // 一次取出n个任务，提高并发性
-    void Take(std::list<T> &tasks, int n = 2);
+    void Take(std::list<T> &tasks, int n = 5);
 
     void Stop();
 
@@ -149,7 +149,7 @@ bool SyncQueue<T>::NotFull() const
     bool full = m_tasks.size() >= m_maxSize;
     if (full)
         std::cout << "SyncQueue Full, thread id = " << std::this_thread::get_id() << std::endl;
-
+    
     return !full;
 }
 
@@ -157,10 +157,10 @@ template <class T>
 bool SyncQueue<T>::NotEmpty() const
 {
     bool empty = m_tasks.empty();
-    if (empty)
+    /*if (empty)
     {
         std::cout << "Syncqueue empty, need wait, thread id = "
                   << std::this_thread::get_id() << std::endl;
-    }
+    }*/
     return !empty;
 }

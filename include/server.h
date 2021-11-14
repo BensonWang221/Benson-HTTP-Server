@@ -18,6 +18,10 @@ public:
     
     void Stop();
 
+    #ifdef TEST
+    void MessagePerSec();
+    #endif
+
 private:
     bool Init();
 

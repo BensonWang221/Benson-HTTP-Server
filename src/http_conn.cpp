@@ -28,10 +28,6 @@ namespace
 }
 inline int SetNonblocking(int fd);
 
-inline void Addfd(int epollfd, int fd, bool oneshot);
-
-inline void Removefd(int epollfd, int fd);
-
 inline void Modifyfd(int epollfd, int fd, int ev);
 
 int http_conn::epollfd = -1;
@@ -242,7 +238,7 @@ HTTP_CODE http_conn::ParseContent(char *text)
 
 HTTP_CODE http_conn::ProcessRead()
 {
-    printf("http_conn::ProcessRead..\n");
+    //printf("http_conn::ProcessRead..\n");
     LINE_STATUS lineStatus = LINE_OK;
     HTTP_CODE result = NO_REQUEST;
     char *text = nullptr;
@@ -252,7 +248,7 @@ HTTP_CODE http_conn::ProcessRead()
     while ((m_checkState == CHECK_STATE_CONTENT && lineStatus == LINE_OK) || ((lineStatus = ParseLine()) == LINE_OK))
     {
         text = GetLine();
-        std::cout << text << std::endl;
+        //std::cout << text << std::endl;
         m_curlinePos = m_checkedPos;
         switch (m_checkState)
         {
@@ -477,7 +473,7 @@ bool http_conn::Write()
 
 void http_conn::operator()()
 {
-    printf("http_conn:: operator()..\n");
+    //printf("http_conn:: operator()..\n");
     HTTP_CODE readRet = ProcessRead();
     if (readRet == NO_REQUEST)
     {
