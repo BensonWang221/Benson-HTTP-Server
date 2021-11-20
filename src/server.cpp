@@ -85,7 +85,7 @@ bool HttpServer::Init()
     {
         std::cout << "new error\n"
                   << std::endl;
-        exit(1);
+        return false;
     }
 
     m_epollfd = epoll_create(5);
@@ -93,12 +93,18 @@ bool HttpServer::Init()
     Addfd(m_epollfd, m_listenfd, false);
     Addfd(m_epollfd, pipefd[0], false);
     http_conn::epollfd = m_epollfd;
+    return true;
 }
 
 void HttpServer::Run()
 {
     printf("Starting server...\n");
-    Init();
+    bool ret = Init();
+    if (!ret)
+    {
+        std::cout << "Server init error." << std::endl;
+        exit(1);
+    }
     int activeNum = 0;
     epoll_event events[MaxEventsNumber];
     m_running = true;
@@ -228,7 +234,7 @@ namespace
         sigfillset(&sa.sa_mask);
         sa.sa_handler = handler;
         if (restart)
-            sa.sa_flags != SA_RESTART;
+            sa.sa_flags |= SA_RESTART;
         assert(sigaction(sig, &sa, nullptr) != -1);
     }
 

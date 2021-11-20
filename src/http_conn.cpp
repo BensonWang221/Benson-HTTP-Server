@@ -320,6 +320,7 @@ bool http_conn::AddErrorTitleForm(const int code, const string &title, const str
                 AddLinger() &&
                 AddBlankLine() &&
                 AddResponse("%s", form.c_str()));
+    return ret;
 }
 
 bool http_conn::AddResponse(const char *format, ...)
@@ -366,12 +367,12 @@ bool http_conn::AddLinger()
 
 bool http_conn::AddBlankLine()
 {
-    AddResponse("%s", "\r\n");
+    return AddResponse("%s", "\r\n");
 }
 
 bool http_conn::AddResponseBody(const char *text, size_t size)
 {
-    AddHeaders("Content-Length", to_string(size));
+    return AddHeaders("Content-Length", to_string(size));
 }
 
 bool http_conn::SendResponse(int code, const string &title, const char *content, size_t len)
