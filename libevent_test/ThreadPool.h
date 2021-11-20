@@ -6,6 +6,7 @@
 #include <mutex>
 #include <memory>
 #include "SyncQueue.h"
+#include "locker.h"
 
 class ThreadPool
 {
@@ -36,7 +37,7 @@ private:
 private:
     std::vector<std::shared_ptr<std::thread>> m_threadGroup;
     SyncQueue<Task> m_queue;
-    std::atomic_bool m_running;
+    MyRWLock<bool> m_running;
     std::once_flag m_onceFlag;
 };
 #endif
