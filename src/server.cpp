@@ -1,5 +1,6 @@
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/signalfd.h>
 #include <signal.h>
 #include <netinet/in.h>
 #include <fcntl.h>
@@ -27,7 +28,8 @@ namespace
 #endif
 
     // 统一事件源，通过信号使server stop
-    int pipefd[2];
+    //int pipefd[2];
+    int sfd;
 
     const int MaxEventsNumber = 10000;
 
@@ -44,10 +46,18 @@ HttpServer::HttpServer(const string &ip, const short port) : m_ip(move(ip)), m_p
 
 bool HttpServer::Init()
 {
-    AddSig(SIGPIPE, SIG_IGN);
+    //AddSig(SIGPIPE, SIG_IGN);
 
     // 统一事件源，处理SIGINT
-    AddSig(SIGINT, StopSignal);
+    //AddSig(SIGINT, StopSignal);
+    // Use signalfd instead
+    sigset_t sigset;
+    sigemptyset(&sigset);
+    sigaddset(&sigset, SIGPIPE);
+    sigaddset(&sigset, SIGINT);
+    assert(sigprocmask(SIG_BLOCK, &sigset, nullptr) != -1);
+    sfd = signalfd(-1, &sigset, SFD_NONBLOCK);
+    assert(sfd != -1);
 
     // 初始化线程池
     m_threadPool = unique_ptr<ThreadPool>(new ThreadPool());
@@ -67,8 +77,8 @@ bool HttpServer::Init()
     inet_pton(AF_INET, m_ip.c_str(), &address.sin_addr);
     address.sin_port = htons(m_port);
     int ret;
-    ret = socketpair(AF_UNIX, SOCK_STREAM, 0, pipefd);
-    assert(ret != -1);
+    //ret = socketpair(AF_UNIX, SOCK_STREAM, 0, pipefd);
+    //assert(ret != -1);
     int reuse = 1;
     setsockopt(m_listenfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
     ret = bind(m_listenfd, (sockaddr *)&address, sizeof(address));
@@ -91,7 +101,7 @@ bool HttpServer::Init()
     m_epollfd = epoll_create(5);
     assert(m_epollfd != -1);
     Addfd(m_epollfd, m_listenfd, false);
-    Addfd(m_epollfd, pipefd[0], false);
+    Addfd(m_epollfd, sfd, false);
     http_conn::epollfd = m_epollfd;
     return true;
 }
@@ -155,10 +165,32 @@ void HttpServer::Run()
                     m_clients[connfd].Init(connfd, connAddress);
                 }
             }
-            else if (fd == pipefd[0])
+            // handle the signal
+            else if (fd == sfd)
             {
-                m_running = false;
-                break;
+                signalfd_siginfo fdinfo;
+                int size = 0;
+                bool stopServer = false;
+                while ((size = read(sfd, &fdinfo, sizeof(fdinfo))) == sizeof(fdinfo))
+                {
+                    if (fdinfo.ssi_signo == SIGINT)
+                    {
+                        cout << "Caught SIGINT, going to close the server." << endl;
+                        stopServer == true;
+                        m_running = false;
+                        break;
+                    }
+                    else if (fdinfo.ssi_signo == SIGPIPE)
+                        continue;
+                    else
+                    {
+                        cout << "unexpected signal" << endl;
+                        continue;
+                    }
+                }
+                if (stopServer)
+                    break;
+
             }
             else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
                 m_clients[fd].CloseConnection();
@@ -227,24 +259,24 @@ void HttpServer::MessagePerSec()
 
 namespace
 {
-    void AddSig(int sig, void(handler)(int), bool restart)
-    {
-        struct sigaction sa;
-        memset(&sa, '\0', sizeof(sa));
-        sigfillset(&sa.sa_mask);
-        sa.sa_handler = handler;
-        if (restart)
-            sa.sa_flags |= SA_RESTART;
-        assert(sigaction(sig, &sa, nullptr) != -1);
-    }
+   // void AddSig(int sig, void(handler)(int), bool restart)
+   // {
+   //     struct sigaction sa;
+   //     memset(&sa, '\0', sizeof(sa));
+   //     sigfillset(&sa.sa_mask);
+   //     sa.sa_handler = handler;
+   //     if (restart)
+   //         sa.sa_flags |= SA_RESTART;
+   //     assert(sigaction(sig, &sa, nullptr) != -1);
+   // }
 
-    void StopSignal(int signal)
-    {
-        int saveError = errno;
-        char msg = signal;
-        // 将信号值写入管道，通知主循环
-        send(pipefd[1], &msg, 1, 0);
-        errno = saveError;
-    }
+   // void StopSignal(int signal)
+   // {
+   //     int saveError = errno;
+   //     char msg = signal;
+   //     // 将信号值写入管道，通知主循环
+   //     send(pipefd[1], &msg, 1, 0);
+   //     errno = saveError;
+   // }
 
 }
